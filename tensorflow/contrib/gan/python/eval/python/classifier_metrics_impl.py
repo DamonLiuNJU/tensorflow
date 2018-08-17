@@ -488,25 +488,25 @@ def frechet_classifier_distance(real_images,
     The Frechet Inception distance. A floating-point scalar of the same type
     as the output of `classifier_fn`.
   """
-
   real_images_list = array_ops.split(
       real_images, num_or_size_splits=num_batches)
   generated_images_list = array_ops.split(
       generated_images, num_or_size_splits=num_batches)
 
-  imgs = array_ops.stack(real_images_list + generated_images_list)
+  real_imgs = array_ops.stack(real_images_list)
+  generated_imgs = array_ops.stack(generated_images_list)
 
   # Compute the activations using the memory-efficient `map_fn`.
-  activations = functional_ops.map_fn(
-      fn=classifier_fn,
-      elems=imgs,
-      parallel_iterations=1,
-      back_prop=False,
-      swap_memory=True,
-      name='RunClassifier')
+  def compute_activations(elems):
+    return functional_ops.map_fn(fn=classifier_fn,
+                                 elems=elems,
+                                 parallel_iterations=1,
+                                 back_prop=False,
+                                 swap_memory=True,
+                                 name='RunClassifier')
 
-  # Split the activations by the real and generated images.
-  real_a, gen_a = array_ops.split(activations, [num_batches, num_batches], 0)
+  real_a = compute_activations(real_imgs)
+  gen_a = compute_activations(generated_imgs)
 
   # Ensure the activations have the right shapes.
   real_a = array_ops.concat(array_ops.unstack(real_a), 0)
@@ -563,7 +563,8 @@ def mean_only_frechet_classifier_distance_from_activations(
   m_w = math_ops.reduce_mean(generated_activations, 0)
 
   # Next the distance between means.
-  mean = math_ops.square(linalg_ops.norm(m - m_w))  # This uses the L2 norm.
+  mean = math_ops.reduce_sum(
+      math_ops.squared_difference(m, m_w))  # Equivalent to L2 but more stable.
   mofid = mean
   if activations_dtype != dtypes.float64:
     mofid = math_ops.cast(mofid, activations_dtype)
@@ -637,7 +638,8 @@ def diagonal_only_frechet_classifier_distance_from_activations(
       (var + var_w) - 2.0 * math_ops.sqrt(math_ops.multiply(var, var_w)))
 
   # Next the distance between means.
-  mean = math_ops.square(linalg_ops.norm(m - m_w))  # This uses the L2 norm.
+  mean = math_ops.reduce_sum(
+      math_ops.squared_difference(m, m_w))  # Equivalent to L2 but more stable.
   dofid = trace + mean
   if activations_dtype != dtypes.float64:
     dofid = math_ops.cast(dofid, activations_dtype)
@@ -695,18 +697,20 @@ def frechet_classifier_distance_from_activations(real_activations,
   # Compute mean and covariance matrices of activations.
   m = math_ops.reduce_mean(real_activations, 0)
   m_w = math_ops.reduce_mean(generated_activations, 0)
-  num_examples = math_ops.to_double(array_ops.shape(real_activations)[0])
+  num_examples_real = math_ops.to_double(array_ops.shape(real_activations)[0])
+  num_examples_generated = math_ops.to_double(
+      array_ops.shape(generated_activations)[0])
 
   # sigma = (1 / (n - 1)) * (X - mu) (X - mu)^T
   real_centered = real_activations - m
   sigma = math_ops.matmul(
       real_centered, real_centered, transpose_a=True) / (
-          num_examples - 1)
+          num_examples_real - 1)
 
   gen_centered = generated_activations - m_w
   sigma_w = math_ops.matmul(
       gen_centered, gen_centered, transpose_a=True) / (
-          num_examples - 1)
+          num_examples_generated - 1)
 
   # Find the Tr(sqrt(sigma sigma_w)) component of FID
   sqrt_trace_component = trace_sqrt_product(sigma, sigma_w)
@@ -718,7 +722,8 @@ def frechet_classifier_distance_from_activations(real_activations,
   trace = math_ops.trace(sigma + sigma_w) - 2.0 * sqrt_trace_component
 
   # Next the distance between means.
-  mean = math_ops.square(linalg_ops.norm(m - m_w))  # This uses the L2 norm.
+  mean = math_ops.reduce_sum(
+      math_ops.squared_difference(m, m_w))  # Equivalent to L2 but more stable.
   fid = trace + mean
   if activations_dtype != dtypes.float64:
     fid = math_ops.cast(fid, activations_dtype)

@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import math
 
+from absl.testing import parameterized
 import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
@@ -67,7 +68,7 @@ class ZeroFractionTest(test_lib.TestCase):
       self.assertTrue(np.isnan(y))
 
 
-class SoftmaxTest(test_lib.TestCase):
+class SoftmaxTest(test_lib.TestCase, parameterized.TestCase):
 
   def _softmax(self, x):
     assert len(x.shape) == 2
@@ -76,7 +77,7 @@ class SoftmaxTest(test_lib.TestCase):
     z = u.sum(1)[:, np.newaxis]
     return u / z
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testSoftmax(self):
     x_shape = [5, 10]
     x_np = np.random.randn(*x_shape).astype(np.float32)
@@ -102,15 +103,15 @@ class SoftmaxTest(test_lib.TestCase):
     self.assertAllClose(x_neg_axis_tf, y_pos_axis_tf, eps)
     self.assertAllClose(y_pos_axis_tf, z_gt_axis_tf, eps)
 
-  def testGradient(self):
-    x_shape = [5, 10]
+  @parameterized.parameters(((5, 10),), ((2, 3, 4),))
+  def testGradient(self, x_shape):
     x_np = np.random.randn(*x_shape).astype(np.float64)
     with self.test_session():
       x_tf = constant_op.constant(x_np)
       y_tf = nn_ops.softmax(x_tf)
       err = gradient_checker.compute_gradient_error(x_tf, x_shape, y_tf,
                                                     x_shape)
-    eps = 1e-8
+    eps = 2e-8
     self.assertLess(err, eps)
 
 
@@ -123,7 +124,7 @@ class LogPoissonLossTest(test_lib.TestCase):
       lpl += np.ma.masked_array(stirling_approx, mask=(z <= 1)).filled(0.)
     return lpl
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testLogPoissonLoss(self):
     x_shape = [5, 10]
     x_np = np.random.randn(*x_shape).astype(np.float32)
@@ -156,7 +157,7 @@ class LogPoissonLossTest(test_lib.TestCase):
     self.assertLess(err_stirling, eps)
 
 
-class LogSoftmaxTest(test_lib.TestCase):
+class LogSoftmaxTest(test_lib.TestCase, parameterized.TestCase):
 
   def _log_softmax(self, x):
     assert len(x.shape) == 2
@@ -164,7 +165,7 @@ class LogSoftmaxTest(test_lib.TestCase):
     u = x - m
     return u - np.log(np.sum(np.exp(u), 1, keepdims=True))
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testLogSoftmax(self):
     x_shape = [5, 10]
     x_np = np.random.randn(*x_shape).astype(np.float32)
@@ -187,8 +188,8 @@ class LogSoftmaxTest(test_lib.TestCase):
     self.assertAllClose(x_neg_axis_tf, y_pos_axis_tf, eps)
     self.assertAllClose(y_pos_axis_tf, z_gt_axis_tf, eps)
 
-  def testGradient(self):
-    x_shape = [5, 10]
+  @parameterized.parameters(((5, 10),), ((2, 3, 4),))
+  def testGradient(self, x_shape):
     x_np = np.random.randn(*x_shape).astype(np.float64)
     with self.test_session():
       x_tf = constant_op.constant(x_np)
@@ -201,7 +202,7 @@ class LogSoftmaxTest(test_lib.TestCase):
 
 class L2LossTest(test_lib.TestCase):
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testL2Loss(self):
     for dtype in [dtypes.float32, dtypes.float64]:
       x = constant_op.constant(
@@ -219,7 +220,7 @@ class L2LossTest(test_lib.TestCase):
       output = nn_ops.l2_loss(x)
       err = gradient_checker.compute_gradient_error(x, x_shape, output, [1])
     print("L2Loss gradient err = %g " % err)
-    err_tolerance = 1e-11
+    err_tolerance = 1e-10
     self.assertLess(err, err_tolerance)
 
 
@@ -235,7 +236,7 @@ class L2NormalizeTest(test_lib.TestCase):
       norm = np.apply_along_axis(np.linalg.norm, dim, x)
       return x / np.expand_dims(norm, dim)
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testL2Normalize(self):
     x_shape = [20, 7, 3]
     np.random.seed(1)
@@ -246,7 +247,7 @@ class L2NormalizeTest(test_lib.TestCase):
       y_tf = nn_impl.l2_normalize(x_tf, dim)
       self.assertAllClose(y_np, self.evaluate(y_tf))
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testL2NormalizeDimArray(self):
     x_shape = [20, 7, 3]
     np.random.seed(1)
@@ -852,6 +853,57 @@ class ComputeSampledLogitsTest(test_lib.TestCase):
       self.assertAllClose(exp_sampled_softmax_loss,
                           got_sampled_softmax_loss.eval(), 1e-4)
 
+  def testSampledSoftmaxLossBf16(self):
+    # A simple test to verify the numerics for bfloat16.
+    def _SoftmaxCrossEntropyWithLogits(logits, targets):
+      # logits, targets: float arrays of the same shape.
+      assert logits.shape == targets.shape
+      stable_exp_logits = np.exp(
+          logits - np.amax(logits, axis=1, keepdims=True))
+      pred = stable_exp_logits / np.sum(stable_exp_logits, 1, keepdims=True)
+      return -np.sum(targets * np.log(pred + 1.0e-20), axis=1)
+
+    np.random.seed(0)
+    num_classes = 5
+    batch_size = 3
+    labels = [0, 1, 2]
+    sampled = [1, 0, 2, 3]
+    (weights, biases, hidden_acts, _, exp_logits,
+     exp_labels) = self._GenerateTestData(
+         num_classes=num_classes,
+         dim=10,
+         batch_size=batch_size,
+         num_true=1,
+         labels=labels,
+         sampled=sampled,
+         subtract_log_q=True)
+    exp_sampled_softmax_loss = _SoftmaxCrossEntropyWithLogits(
+        exp_logits, exp_labels)
+
+    with self.test_session():
+      true_exp_bf16 = np.full(
+          [batch_size, 1], fill_value=0.5, dtype=dtypes.bfloat16.as_numpy_dtype)
+      sampled_exp_bf16 = np.full(
+          [len(sampled)], fill_value=0.5, dtype=dtypes.bfloat16.as_numpy_dtype)
+      sampled_vals_bf16 = (sampled, true_exp_bf16, sampled_exp_bf16)
+
+      got_sampled_softmax_loss = math_ops.cast(
+          nn_impl.sampled_softmax_loss(
+              weights=constant_op.constant(weights, dtype=dtypes.bfloat16),
+              biases=constant_op.constant(biases, dtype=dtypes.bfloat16),
+              labels=constant_op.constant(
+                  labels, shape=(batch_size, 1), dtype=dtypes.bfloat16),
+              inputs=constant_op.constant(hidden_acts, dtype=dtypes.bfloat16),
+              num_sampled=4,
+              num_classes=num_classes,
+              num_true=1,
+              sampled_values=sampled_vals_bf16,
+              remove_accidental_hits=False,
+              partition_strategy="div"), dtypes.float32)
+
+      self.assertAllClose(exp_sampled_softmax_loss,
+                          got_sampled_softmax_loss.eval(), 1e-1)
+
 
 class CReluTest(test_lib.TestCase):
 
@@ -910,6 +962,16 @@ class LeakyReluTest(test_lib.TestCase):
       tol = 2e-3 if dtype == np.float16 else 1e-6
       self.assertAllClose(
           outputs, [-0.4, -0.2, 0.0, 1.0, 2.0], rtol=tol, atol=tol)
+
+  def testName(self):
+    np_values = np.array([-2, -1, 0, 1, 2], dtype=np.float64)
+    outputs_with_name_set = nn_ops.leaky_relu(
+        constant_op.constant(np_values),
+        name='test_relu_op')
+    self.assertEqual(outputs_with_name_set.name, 'test_relu_op:0')
+    outputs_without_name_set = nn_ops.leaky_relu(
+        constant_op.constant(np_values))
+    self.assertEqual(outputs_without_name_set.name, 'LeakyRelu:0')
 
 
 class SwishTest(test_lib.TestCase):
@@ -1029,6 +1091,42 @@ class DataFormatDimMapTest(test_lib.TestCase):
     self._test([1, 3, -2], [2, 1, 3])
     self._test([1, -3, -2], [2, 2, 3])
     self._test([[1, -3], [1, -1]], [[2, 2], [2, 1]])
+
+  def testNHWCtoNCHW(self):
+    x_val = [1, -3, -2]
+    y_val_expected = [2, 2, 3]
+    x = constant_op.constant(x_val)
+    y = nn_ops.data_format_dim_map(x, src_format="NHWC", dst_format="NCHW")
+    with self.test_session(use_gpu=test_lib.is_gpu_available()) as sess:
+      y_val = sess.run(y)
+      self.assertAllEqual(y_val, y_val_expected)
+
+  def testNHWCtoHWNC(self):
+    x_val = [-4, -3, -2, -1, 0, 1, 2, 3]
+    y_val_expected = [2, 0, 1, 3, 2, 0, 1, 3]
+    x = constant_op.constant(x_val)
+    y = nn_ops.data_format_dim_map(x, src_format="NHWC", dst_format="HWNC")
+    with self.test_session(use_gpu=test_lib.is_gpu_available()) as sess:
+      y_val = sess.run(y)
+      self.assertAllEqual(y_val, y_val_expected)
+
+  def testNHWCtoWHCN(self):
+    x_val = [-4, -3, -2, -1, 0, 1, 2, 3]
+    y_val_expected = [3, 1, 0, 2, 3, 1, 0, 2]
+    x = constant_op.constant(x_val)
+    y = nn_ops.data_format_dim_map(x, src_format="NHWC", dst_format="WHCN")
+    with self.test_session(use_gpu=test_lib.is_gpu_available()) as sess:
+      y_val = sess.run(y)
+      self.assertAllEqual(y_val, y_val_expected)
+
+  def testArbitraryASCII(self):
+    x_val = [-4, -3, -2, -1, 0, 1, 2, 3]
+    y_val_expected = [3, 2, 1, 0, 3, 2, 1, 0]
+    x = constant_op.constant(x_val)
+    y = nn_ops.data_format_dim_map(x, src_format="qwer", dst_format="rewq")
+    with self.test_session(use_gpu=test_lib.is_gpu_available()) as sess:
+      y_val = sess.run(y)
+      self.assertAllEqual(y_val, y_val_expected)
 
 
 class DataFormatVectorPermuteTest(test_lib.TestCase):

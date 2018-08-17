@@ -20,7 +20,7 @@ from __future__ import print_function
 
 import numpy as np
 
-from tensorflow.compiler.tests.xla_test import XLATestCase
+from tensorflow.compiler.tests import xla_test
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.ops import array_ops
@@ -32,7 +32,7 @@ from tensorflow.python.ops import nn_ops
 from tensorflow.python.platform import googletest
 
 
-class BinaryOpsTest(XLATestCase):
+class BinaryOpsTest(xla_test.XLATestCase):
   """Test cases for binary operators."""
 
   def _testBinary(self, op, a, b, expected, equality_test=None):
@@ -190,19 +190,24 @@ class BinaryOpsTest(XLATestCase):
           ],
           equality_test=self.ListsAreClose)
 
-      self._testBinary(
-          gen_nn_ops.sparse_softmax_cross_entropy_with_logits,
-          np.array([[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8],
-                    [0.9, 1.0, 1.1, 1.2]], dtype=dtype),
-          np.array([2, 1, 7], dtype=np.int32),
-          expected=[
-              np.array([1.342536, 1.442536, np.nan], dtype=dtype),
-              np.array([[0.213838, 0.236328, -0.738817, 0.288651],
-                        [0.213838, -0.763672, 0.261183, 0.288651],
-                        [np.nan, np.nan, np.nan, np.nan]],
-                       dtype=dtype),
-          ],
-          equality_test=self.ListsAreClose)
+      # TODO(b/68813416): Fails with bfloat16.
+      if dtype != dtypes.bfloat16.as_numpy_dtype:
+        self._testBinary(
+            gen_nn_ops.sparse_softmax_cross_entropy_with_logits,
+            np.array(
+                [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8],
+                 [0.9, 1.0, 1.1, 1.2]],
+                dtype=dtype),
+            np.array([2, 1, 7], dtype=np.int32),
+            expected=[
+                np.array([1.342536, 1.442536, np.nan], dtype=dtype),
+                np.array(
+                    [[0.213838, 0.236328, -0.738817, 0.288651], [
+                        0.213838, -0.763672, 0.261183, 0.288651
+                    ], [np.nan, np.nan, np.nan, np.nan]],
+                    dtype=dtype),
+            ],
+            equality_test=self.ListsAreClose)
 
   def testIntOps(self):
     for dtype in self.int_types:
@@ -221,6 +226,11 @@ class BinaryOpsTest(XLATestCase):
           np.array([0b1, 0b101, 0b1000], dtype=dtype),
           np.array([0b0, 0b101, 0b1001], dtype=dtype),
           expected=np.array([0b1, 0b101, 0b1001], dtype=dtype))
+      self._testSymmetricBinary(
+          bitwise_ops.bitwise_xor,
+          np.array([0b1, 0b111, 0b1100], dtype=dtype),
+          np.array([0b0, 0b101, 0b1001], dtype=dtype),
+          expected=np.array([0b1, 0b010, 0b0101], dtype=dtype))
 
       lhs = np.array([0, 5, 3, 14], dtype=dtype)
       rhs = np.array([5, 0, 7, 11], dtype=dtype)
@@ -260,12 +270,6 @@ class BinaryOpsTest(XLATestCase):
           np.array([[1], [2]], dtype=dtype),
           dtype(7),
           expected=np.array([[8], [9]], dtype=dtype))
-      self._testBinary(
-          math_ops.add,
-          np.array([0xffffffff, 0xfffffffff, 1, 1], dtype=np.int64),
-          np.array([1, 1, 0xffffffff, 0xfffffffff], dtype=np.int64),
-          expected=np.array(
-              [1 << 32, 1 << 36, 1 << 32, 1 << 36], dtype=np.int64))
 
       self._testBinary(
           math_ops.subtract,
@@ -360,6 +364,14 @@ class BinaryOpsTest(XLATestCase):
           np.array([[[[1, 2], [3, 4]]]], dtype=dtype),
           np.array([2, -1], dtype=dtype),
           expected=np.array([[[[3, 1], [5, 3]]]], dtype=dtype))
+
+    if np.int64 in self.numeric_types:
+      self._testBinary(
+          math_ops.add,
+          np.array([0xffffffff, 0xfffffffff, 1, 1], dtype=np.int64),
+          np.array([1, 1, 0xffffffff, 0xfffffffff], dtype=np.int64),
+          expected=np.array([1 << 32, 1 << 36, 1 << 32, 1 << 36],
+                            dtype=np.int64))
 
   def testComplexOps(self):
     for dtype in self.complex_types:
@@ -679,11 +691,13 @@ class BinaryOpsTest(XLATestCase):
           np.array([[10], [7], [2]], dtype=np.float32),
           np.float32(7),
           expected=np.array([[False], [False], [True]], dtype=np.bool))
-      self._testBinary(
-          less_op,
-          np.array([[10], [7], [2], [-1]], dtype=np.int64),
-          np.int64(7),
-          expected=np.array([[False], [False], [True], [True]], dtype=np.bool))
+      if np.int64 in self.numeric_types:
+        self._testBinary(
+            less_op,
+            np.array([[10], [7], [2], [-1]], dtype=np.int64),
+            np.int64(7),
+            expected=np.array(
+                [[False], [False], [True], [True]], dtype=np.bool))
 
     for less_equal_op in [math_ops.less_equal, (lambda x, y: x <= y)]:
       self._testBinary(
@@ -1208,6 +1222,24 @@ class BinaryOpsTest(XLATestCase):
           np.array([[1, 2], [3, 4]], dtype=dtype),
           np.array([1, 0], dtype=np.int32),
           expected=np.array([[1, 3], [2, 4]], dtype=dtype))
+
+  def testConjugateTranspose(self):
+    for dtype in self.complex_types:
+      self._testBinary(
+          array_ops.conjugate_transpose,
+          np.zeros(shape=[1, 0, 4], dtype=dtype),
+          np.array([1, 2, 0], dtype=np.int32),
+          expected=np.zeros(shape=[0, 4, 1], dtype=dtype))
+      self._testBinary(
+          array_ops.conjugate_transpose,
+          np.array([[1 - 1j, 2 + 2j], [3 - 3j, 4 + 4j]], dtype=dtype),
+          np.array([0, 1], dtype=np.int32),
+          expected=np.array([[1 + 1j, 2 - 2j], [3 + 3j, 4 - 4j]], dtype=dtype))
+      self._testBinary(
+          array_ops.conjugate_transpose,
+          np.array([[1 - 1j, 2 + 2j], [3 - 3j, 4 + 4j]], dtype=dtype),
+          np.array([1, 0], dtype=np.int32),
+          expected=np.array([[1 + 1j, 3 + 3j], [2 - 2j, 4 - 4j]], dtype=dtype))
 
   def testCross(self):
     for dtype in self.float_types:

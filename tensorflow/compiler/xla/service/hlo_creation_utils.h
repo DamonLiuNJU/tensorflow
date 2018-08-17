@@ -97,17 +97,38 @@ StatusOr<HloInstruction*> MakeGetTupleElementHlo(HloInstruction* operand,
 StatusOr<HloInstruction*> MakeConcatHlo(
     tensorflow::gtl::ArraySlice<HloInstruction*> operands, int64 dimension);
 
+// Creates a Dot HLO instruction and adds it to the computation containing `lhs`
+// and `rhs` (both must be in the same computation).
+StatusOr<HloInstruction*> MakeDotHlo(HloInstruction* lhs, HloInstruction* rhs,
+                                     const DotDimensionNumbers& dim_numbers);
+
+// Creates a Map HLO instruction and adds it to the computation containing the
+// operands. All operands must be in the same computation.
+StatusOr<HloInstruction*> MakeMapHlo(
+    tensorflow::gtl::ArraySlice<HloInstruction*> operands,
+    HloComputation* map_computation);
+
 // -----------------------------------------------------------------------------
 // Some other miscellaneous helpers to generate common HLO patterns.  All of
 // these add all the instructions they generate into the computation containing
 // their operand(s).
 
 // Collapses (via reshape) the first N (logical) dimensions of `operand` into a
-// single leading dimension.  `operand` must have rank > n.
+// single leading dimension.  `operand` must have rank > `n` and `n` must not be
+// 0.
 //
 // For instance if `operand` has shape f32[7,8,9] and n is 2 then the output is
 // the `operand` reshaped to [56,9].
 StatusOr<HloInstruction*> CollapseFirstNDims(HloInstruction* operand, int64 n);
+
+// Prepends `n` degenerate dimensions (dimensions with bound = 1) to `operand`
+// using a reshape.
+//
+// For instance if operand has shape f32[3,4,5] then this returns the operand
+// reshaped to f32[1,3,4,5].  If the operand is a f32 scalar (i.e. has shape
+// f32[]) then this returns the operand reshaped to f32[1].
+StatusOr<HloInstruction*> PrependDegenerateDims(HloInstruction* operand,
+                                                int64 n);
 
 // Expands (via reshape) the first (logical) dimension of `operand` into a
 // sequence of `expanded_dims` dimensions.  `operand` must at least be of rank 1
@@ -119,16 +140,6 @@ StatusOr<HloInstruction*> CollapseFirstNDims(HloInstruction* operand, int64 n);
 StatusOr<HloInstruction*> ExpandFirstDimIntoNDims(
     HloInstruction* operand, tensorflow::gtl::ArraySlice<int64> expanded_dims);
 
-// Expands (via reshape) the last (logical) dimension of `operand` into a
-// sequence of `expanded_dims` dimensions.  `operand` must at least be of rank 1
-// and the number of elements in its last dimension must be equal to the
-// product of `expanded_dims`.
-//
-// For instance if `operand` has shape f32[9,7,200] and expanded_dims is
-// {2,5,20} the result is `operand` reshaped to [9,7,2,5,20].
-StatusOr<HloInstruction*> ExpandLastDimIntoNDims(
-    HloInstruction* operand, tensorflow::gtl::ArraySlice<int64> expanded_dims);
-
 // Elides (via reshape) a set of degenerate dimensions (dimensions containing
 // exactly one element), `dims_to_elide` from `operand`.  Every dimension in
 // `dims_to_elide` must be a degenerate dimension.  `dims_to_elide` must be
@@ -138,6 +149,16 @@ StatusOr<HloInstruction*> ExpandLastDimIntoNDims(
 // is {1,5} then the result is `operand` reshaped to [19,20,1,7,9].
 StatusOr<HloInstruction*> ElideDegenerateDims(
     HloInstruction* operand, tensorflow::gtl::ArraySlice<int64> dims_to_elide);
+
+// Inserts (via reshape) a set of degenerate dimensions (dimensions containing
+// exactly one element), `dims_to_insert` into `operand`. The dimensions in
+// `dims_to_insert` refer to the dimensions in the result, and hence should be
+// less than the rank of the result. Also, `dims_to_insert` must be sorted.
+//
+// For example, if `operand` is of shape f32[12,21,8,34] and dims_to_insert is
+// {0, 2}, then the result is `operand` reshaped to [1,12,1,21,8,34].
+StatusOr<HloInstruction*> InsertDegenerateDims(
+    HloInstruction* operand, tensorflow::gtl::ArraySlice<int64> dims_to_insert);
 
 // Pads `operand` (which must have rank 1) with `zeros_to_prepend` zeros in the
 // front and `zeros_to_append` zeros in the back.

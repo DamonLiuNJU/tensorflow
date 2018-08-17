@@ -27,6 +27,21 @@ limitations under the License.
 
 namespace tensorflow {
 
+TEST(ArrayOpsTest, UnravelIndex_ShapeFn) {
+  ShapeInferenceTestOp op("UnravelIndex");
+
+  INFER_OK(op, "?;?", "?");
+
+  INFER_OK(op, "[];[?]", "[d1_0]");
+
+  INFER_OK(op, "[4,5];[?]", "[d1_0,20]");
+  INFER_OK(op, "[2,3,4];[?]", "[d1_0,24]");
+  INFER_OK(op, "?;[?]", "?");
+  INFER_OK(op, "[?];[?]", "[d1_0,?]");
+
+  INFER_ERROR("Shape must be rank 1 but is rank 2", op, "?;[1,1]");
+}
+
 TEST(ArrayOpsTest, Pack_ShapeFn) {
   ShapeInferenceTestOp op("Pack");
   auto set_axis = [&op](int axis) {
@@ -838,7 +853,7 @@ TEST(ArrayOpsTest, Reshape_ShapeFn) {
   // Unknown dimensions.
   // Flatten:
   new_shape = test::AsTensor<int32>({-1});
-  INFER_OK(op, "[?];[1]", "[?]");
+  INFER_OK(op, "[?];[1]", "[d0_0]");
   INFER_OK(op, "[2,2];[1]", "[4]");
   // The first dimension is inferred:
   new_shape = test::AsTensor<int32>({2, -1});
@@ -850,6 +865,10 @@ TEST(ArrayOpsTest, Reshape_ShapeFn) {
   // Multiple missing dimensions cannot be inferred.
   new_shape = test::AsTensor<int32>({-1, -1, 2});
   INFER_OK(op, "[8];[3]", "[?,?,2]");
+
+  // Symbolic shape propagation
+  new_shape = test::AsTensor<int32>({-1, 2, 3});
+  INFER_OK(op, "[?,2,3];[3]", "[d0_0,2,3]");
 
   // Reshaping to a scalar.
   new_shape = test::AsTensor<int32>({});

@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
+#include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/ptr_util.h"
 #include "tensorflow/compiler/xla/service/shape_inference.h"
@@ -162,7 +163,43 @@ StatusOr<HloInstruction*> MakeConcatHlo(ArraySlice<HloInstruction*> operands,
       HloInstruction::CreateConcatenate(concat_shape, operands, dimension));
 }
 
+StatusOr<HloInstruction*> MakeDotHlo(HloInstruction* lhs, HloInstruction* rhs,
+                                     const DotDimensionNumbers& dim_numbers) {
+  HloComputation* computation = lhs->parent();
+  CHECK_EQ(computation, rhs->parent());
+  TF_ASSIGN_OR_RETURN(
+      Shape dot_shape,
+      ShapeInference::InferDotOpShape(lhs->shape(), rhs->shape(), dim_numbers));
+  return computation->AddInstruction(
+      HloInstruction::CreateDot(dot_shape, lhs, rhs, dim_numbers));
+}
+
+StatusOr<HloInstruction*> MakeMapHlo(
+    tensorflow::gtl::ArraySlice<HloInstruction*> operands,
+    HloComputation* map_computation) {
+  CHECK(!operands.empty()) << "Map Hlo requires at least one operand.";
+  HloComputation* computation = operands.front()->parent();
+  std::vector<const Shape*> operand_shapes;
+  int64 max_operand_rank = 0;
+  for (const HloInstruction* operand : operands) {
+    CHECK_EQ(computation, operand->parent());
+    operand_shapes.push_back(&operand->shape());
+    max_operand_rank =
+        std::max(max_operand_rank, ShapeUtil::Rank(operand->shape()));
+  }
+  std::vector<int64> map_dims(max_operand_rank);
+  std::iota(map_dims.begin(), map_dims.end(), 0);
+  TF_ASSIGN_OR_RETURN(
+      Shape map_shape,
+      ShapeInference::InferMapShape(
+          operand_shapes, map_computation->ComputeProgramShape(), map_dims));
+  return computation->AddInstruction(
+      HloInstruction::CreateMap(map_shape, operands, map_computation));
+}
+
 StatusOr<HloInstruction*> CollapseFirstNDims(HloInstruction* operand, int64 n) {
+  CHECK_GT(n, 0);
+
   const Shape& operand_shape = operand->shape();
   CHECK_GE(operand_shape.dimensions_size(), n);
   int64 new_shape_leading_bound = 1;
@@ -184,6 +221,17 @@ StatusOr<HloInstruction*> CollapseFirstNDims(HloInstruction* operand, int64 n) {
   return MakeReshapeHlo(output_shape, operand);
 }
 
+StatusOr<HloInstruction*> PrependDegenerateDims(HloInstruction* operand,
+                                                int64 n) {
+  CHECK_GT(n, 0);
+  std::vector<int64> new_shape_dims;
+  const Shape& operand_shape = operand->shape();
+  new_shape_dims.reserve(n + operand_shape.dimensions_size());
+  new_shape_dims.insert(new_shape_dims.begin(), n, 1);
+  c_copy(operand_shape.dimensions(), std::back_inserter(new_shape_dims));
+  return MakeReshapeHlo(new_shape_dims, operand);
+}
+
 StatusOr<HloInstruction*> ExpandFirstDimIntoNDims(
     HloInstruction* operand, ArraySlice<int64> expanded_dims) {
   CHECK_GT(operand->shape().dimensions_size(), 0);
@@ -196,24 +244,6 @@ StatusOr<HloInstruction*> ExpandFirstDimIntoNDims(
   std::copy(operand->shape().dimensions().begin() + 1,
             operand->shape().dimensions().end(),
             std::back_inserter(expanded_shape_dim_bounds));
-  Shape new_shape = ShapeUtil::MakeShape(operand->shape().element_type(),
-                                         expanded_shape_dim_bounds);
-  return MakeReshapeHlo(new_shape, operand);
-}
-
-StatusOr<HloInstruction*> ExpandLastDimIntoNDims(
-    HloInstruction* operand, ArraySlice<int64> expanded_dims) {
-  CHECK_GT(operand->shape().dimensions_size(), 0);
-  CHECK_EQ(operand->shape().dimensions(operand->shape().dimensions_size() - 1),
-           Product(expanded_dims));
-
-  std::vector<int64> expanded_shape_dim_bounds;
-  expanded_shape_dim_bounds.reserve(expanded_dims.size() +
-                                    operand->shape().dimensions_size() - 1);
-  std::copy(operand->shape().dimensions().begin(),
-            operand->shape().dimensions().end() - 1,
-            std::back_inserter(expanded_shape_dim_bounds));
-  c_copy(expanded_dims, std::back_inserter(expanded_shape_dim_bounds));
   Shape new_shape = ShapeUtil::MakeShape(operand->shape().element_type(),
                                          expanded_shape_dim_bounds);
   return MakeReshapeHlo(new_shape, operand);
@@ -244,6 +274,38 @@ StatusOr<HloInstruction*> ElideDegenerateDims(HloInstruction* operand,
   return MakeReshapeHlo(output_shape, operand);
 }
 
+StatusOr<HloInstruction*> InsertDegenerateDims(
+    HloInstruction* operand, ArraySlice<int64> dims_to_insert) {
+  CHECK(c_is_sorted(dims_to_insert));
+
+  const Shape& operand_shape = operand->shape();
+  int64 output_shape_rank =
+      operand_shape.dimensions_size() + dims_to_insert.size();
+  for (auto dim_to_insert : dims_to_insert) {
+    CHECK_LT(dim_to_insert, output_shape_rank);
+  }
+
+  std::vector<int64> output_shape_dim_bounds;
+  output_shape_dim_bounds.reserve(output_shape_rank);
+  int64 operand_dims_idx = 0;
+  int64 dims_to_insert_idx = 0;
+  for (int64 i = 0; i < output_shape_rank; ++i) {
+    if (dims_to_insert_idx < dims_to_insert.size() &&
+        i == dims_to_insert[dims_to_insert_idx]) {
+      output_shape_dim_bounds.push_back(1);
+      ++dims_to_insert_idx;
+    } else {
+      output_shape_dim_bounds.push_back(
+          operand_shape.dimensions(operand_dims_idx));
+      ++operand_dims_idx;
+    }
+  }
+
+  Shape output_shape = ShapeUtil::MakeShape(operand_shape.element_type(),
+                                            output_shape_dim_bounds);
+  return MakeReshapeHlo(output_shape, operand);
+}
+
 StatusOr<HloInstruction*> PadVectorWithZeros(HloInstruction* operand,
                                              int64 zeros_to_prepend,
                                              int64 zeros_to_append) {
@@ -255,9 +317,9 @@ StatusOr<HloInstruction*> PadVectorWithZeros(HloInstruction* operand,
   padding_config_dim.set_edge_padding_high(zeros_to_append);
   *padding_config.add_dimensions() = padding_config_dim;
 
-  HloInstruction* zero =
-      computation->AddInstruction(HloInstruction::CreateConstant(
-          MakeUnique<Literal>(Literal::Zero(operand->shape().element_type()))));
+  HloInstruction* zero = computation->AddInstruction(
+      HloInstruction::CreateConstant(MakeUnique<Literal>(
+          LiteralUtil::Zero(operand->shape().element_type()))));
   return MakePadHlo(operand, zero, padding_config);
 }
 
@@ -266,7 +328,7 @@ StatusOr<HloInstruction*> BroadcastZeros(
     ArraySlice<int64> broadcast_dimensions) {
   HloInstruction* zero =
       computation->AddInstruction(HloInstruction::CreateConstant(
-          MakeUnique<Literal>(Literal::Zero(element_type))));
+          MakeUnique<Literal>(LiteralUtil::Zero(element_type))));
   return MakeBroadcastHlo(zero, /*broadcast_dimensions=*/{},
                           /*result_shape_bounds=*/broadcast_dimensions);
 }
@@ -274,7 +336,7 @@ StatusOr<HloInstruction*> BroadcastZeros(
 StatusOr<std::unique_ptr<HloComputation>> CreateComputationWithSignature(
     ArraySlice<const Shape*> domain, const Shape& range,
     tensorflow::StringPiece name) {
-  HloComputation::Builder b(name.ToString());
+  HloComputation::Builder b{std::string(name)};
   int64 param_idx = 0;
   for (const Shape* param_shape : domain) {
     b.AddInstruction(HloInstruction::CreateParameter(

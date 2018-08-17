@@ -30,6 +30,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/core/lib/core/bits.h"
+#include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/logging.h"
@@ -408,7 +409,7 @@ class Array {
 
   // Returns the total number of elements in the array.
   int64 num_elements() const {
-    return std::accumulate(sizes_.begin(), sizes_.end(), 1,
+    return std::accumulate(sizes_.begin(), sizes_.end(), 1LL,
                            std::multiplies<int64>());
   }
 
